@@ -25,6 +25,11 @@ class CollectorMain:
     def pressure_pa(self) -> float:
         return self._pressure_pa
 
+    def bind(self, limits: CollectorLimits) -> None:
+        """热绑定新版集气管约束（目标带/速率，当前压力不重置）。"""
+
+        self._limits = limits
+
     def regulate(self, dt: float) -> float:
         """向目标压力调节一个步长，返回新压力。"""
 

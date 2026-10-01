@@ -23,6 +23,15 @@ class HeatingReversal:
     def limits(self) -> HeatingLimits:
         return self._limits
 
+    def bind_interval(self, limits: HeatingLimits) -> None:
+        """热绑定新版加热约束中的换向间隔（LIVE：下一次到期判定用新间隔）。
+
+        上次换向时刻与累计次数保留；炉温目标/确认带属于配方类，由
+        :class:`~coke.heating.temperature.OvenTemperature` 侧绑定。
+        """
+
+        self._limits = limits
+
     def due(self, now: float | None = None) -> bool:
         """当前时刻是否已到换向间隔。"""
 

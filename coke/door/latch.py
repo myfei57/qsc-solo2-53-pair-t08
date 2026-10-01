@@ -22,6 +22,11 @@ class DoorLatch:
     def travel_mm(self) -> float:
         return self._travel_mm
 
+    def bind(self, travel_mm: float) -> None:
+        """热绑定新版闩锁行程（配方类）。"""
+
+        self._travel_mm = float(travel_mm)
+
     @property
     def position_mm(self) -> float:
         return self._position_mm

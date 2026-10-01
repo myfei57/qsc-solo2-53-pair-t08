@@ -29,6 +29,11 @@ class ChargingCar:
     def limits(self) -> ChargerLimits:
         return self._limits
 
+    def bind(self, limits: ChargerLimits) -> None:
+        """热绑定新版装煤约束（配方类，下一炉生效）。"""
+
+        self._limits = limits
+
     def align_hopper(self, oven: str, target_mm: float, measured_mm: float) -> Alignment:
         """核对煤斗对位，返回核对结果。"""
 

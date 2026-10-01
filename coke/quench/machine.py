@@ -32,6 +32,14 @@ class QuenchCar:
     def spray(self) -> Spray:
         return self._spray
 
+    def bind(self, limits: QuenchLimits) -> None:
+        """热绑定新版熄焦约束（配方类，下一炉重建走行计划与喷淋）。"""
+
+        self._limits = limits
+        self._plan = TravelPlan(limits.travel_distance_m, limits.travel_speed_m_s)
+        self._spray = Spray(limits.spray_duration_s, limits.water_flow_m3_h)
+        self._travelled_m = 0.0
+
     def receive(self, oven: str) -> None:
         """在焦侧接焦。"""
 

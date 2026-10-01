@@ -7,6 +7,9 @@
             控制周期 → 并发探测 → 行程标定），用于交付前的真实运行检查；
 ``status``  打印当前状态快照；
 ``config``  打印生效配置；
+``versions`` 打印配置版本链与在跑冻结状态；
+``migrate`` 整套热切换到一份新配置文件（不重启，在跑操作按类别生效）；
+``rollback`` 回退到上一版配置（幂等）；
 ``reset``   清掉落盘的平台计数。
 """
 
@@ -131,6 +134,28 @@ def _cmd_config(args: argparse.Namespace) -> int:
     return 0
 
 
+def _cmd_versions(args: argparse.Namespace) -> int:
+    platform = _build(args)
+    _dump(platform.config_overview())
+    return 0
+
+
+def _cmd_migrate(args: argparse.Namespace) -> int:
+    if not getattr(args, "new_config", None):
+        raise CokeError("migrate 需要用 --file 指定一份完整的新配置", component="config")
+    candidate = load_config(args.new_config)
+    platform = _build(args)
+    result = platform.migrate_config(config_to_mapping(candidate), reason="cli")
+    _dump(result)
+    return 0 if result.get("changed") or result.get("idempotent") else 1
+
+
+def _cmd_rollback(args: argparse.Namespace) -> int:
+    platform = _build(args)
+    _dump(platform.rollback_config(reason="cli"))
+    return 0
+
+
 def _cmd_reset(args: argparse.Namespace) -> int:
     platform = _build(args)
     removed = platform.reset_state()
@@ -167,6 +192,16 @@ def build_parser() -> argparse.ArgumentParser:
 
     config = sub.add_parser("config", help="打印生效配置", parents=[common])
     config.set_defaults(func=_cmd_config)
+
+    versions = sub.add_parser("versions", help="打印配置版本链与在跑冻结状态", parents=[common])
+    versions.set_defaults(func=_cmd_versions)
+
+    migrate = sub.add_parser("migrate", help="整套热切换到新配置文件", parents=[common])
+    migrate.add_argument("--file", dest="new_config", required=True, help="新版完整配置 JSON 路径")
+    migrate.set_defaults(func=_cmd_migrate)
+
+    rollback = sub.add_parser("rollback", help="回退到上一版配置（幂等）", parents=[common])
+    rollback.set_defaults(func=_cmd_rollback)
 
     reset = sub.add_parser("reset", help="清掉落盘的平台计数", parents=[common])
     reset.set_defaults(func=_cmd_reset)

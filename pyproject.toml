@@ -26,4 +26,5 @@ packages = [
     "coke.dust",
     "coke.sequence",
     "coke.console",
+    "coke.configmgr",
 ]

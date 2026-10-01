@@ -4,6 +4,9 @@
 管压力带、熄焦喷淋时长、换向间隔、炉温确认带、除尘挡板联动参数与存储目录。
 任何缺失或越界取值都在装配阶段抛出 :class:`ConfigError`，不允许带着半份
 配置启动控制链。
+
+运行期热更新不在本模块做：改参数走 :mod:`coke.configmgr` 的整套版本切换，
+各执行组件通过 ``bind()`` 接收新版参数；这里的 dataclass 保持不可变值对象。
 """
 
 from __future__ import annotations

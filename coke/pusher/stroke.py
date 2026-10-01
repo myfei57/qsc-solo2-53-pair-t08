@@ -32,6 +32,14 @@ class StrokeBaseline:
 
         return self._epoch
 
+    def bind(self, baseline_mm: float, tolerance_mm: float) -> None:
+        """热绑定新版基线与公差（配置改版，不计入标定代际）。"""
+
+        if baseline_mm <= 0:
+            raise ValueError("行程基线必须为正")
+        self._baseline_mm = float(baseline_mm)
+        self._tolerance_mm = float(tolerance_mm)
+
     def calibrate(self, value_mm: float) -> float:
         """重新标定基线，返回新的基线值。"""
 

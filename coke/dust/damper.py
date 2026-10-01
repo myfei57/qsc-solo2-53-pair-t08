@@ -19,6 +19,12 @@ class DustDamper:
     def angle_deg(self) -> float:
         return self._angle_deg
 
+    def bind(self, open_deg: float, rate_deg_per_s: float) -> None:
+        """热绑定新版挡板开度与驱动速率（LIVE：下一个控制周期用新值）。"""
+
+        self._open_deg = float(open_deg)
+        self._rate_deg_per_s = float(rate_deg_per_s)
+
     def drive_to(self, target_deg: float, dt: float) -> float:
         """按驱动速率把挡板推向目标开度，返回新开度。"""
 

@@ -32,6 +32,11 @@ class GuideCar:
     def limits(self) -> GuideLimits:
         return self._limits
 
+    def bind(self, limits: GuideLimits) -> None:
+        """热绑定新版导焦栅约束（配方类）。"""
+
+        self._limits = limits
+
     def align(self, oven: str, target_mm: float, measured_mm: float) -> Alignment:
         """按目标与实测位置核对对齐，返回核对结果。"""
 

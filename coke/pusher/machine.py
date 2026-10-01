@@ -32,6 +32,14 @@ class PusherMachine:
     def limits(self) -> PusherLimits:
         return self._limits
 
+    def bind(self, limits: PusherLimits) -> None:
+        """热绑定新版推焦约束（配方类，空闲或操作开始冻结时调用）。
+
+        已提交速度保持不变，仅收窄/放宽后续夹取区间与行程上限。
+        """
+
+        self._limits = limits
+
     @property
     def state(self) -> str:
         return self._state

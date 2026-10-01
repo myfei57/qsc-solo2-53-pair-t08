@@ -4,18 +4,26 @@
 推焦、熄焦、换向、炉门清扫）、控制循环、并发仲裁探测和状态快照。控制循环
 每个周期做三件事：把集气管压力调向目标带、按推焦联动时序驱动除尘挡板、
 采集趋势；换向与推焦这类跨模块动作都由编排一次性走完并写审计。
+
+配置热更新由 :class:`~coke.configmgr.ConfigManager` 管版本：每个操作入口冻结
+开始那一版（``_operation_pin``），操作配方按冻结版跑完，出口再对齐到当前
+生效版；``migrate_config`` / ``rollback_config`` 是整套切换与幂等回退入口。
 """
 
 from __future__ import annotations
 
+import contextlib
 import dataclasses
 import threading
+from collections.abc import Iterator
+from typing import Any, Mapping
 
 from .audit.log import AuditLog
 from .audit.record import AuditRecord
 from .charger.machine import ChargingCar
 from .clock import Clock, SystemClock
-from .config import PlatformConfig, default_config
+from .config import PlatformConfig, config_to_mapping, default_config
+from .configmgr import ConfigManager
 from .door.latch import DoorLatch
 from .door.machine import DoorCleaner
 from .dust.damper import DustDamper
@@ -96,6 +104,18 @@ class Platform:
         self._operations = 0
         self._lock = threading.RLock()
         self._register_namespaces()
+        # 版本库装配在设备之后：构造时从版本存档恢复当前版，并把生效参数完整
+        # 下发一遍；存档缺失时以启动配置为种子版（v1）。
+        self.configs = ConfigManager(
+            self.config,
+            clock=self.clock,
+            store=store,
+            bus=self.bus,
+            apply_live=self._apply_live_config,
+            apply_bound=self._apply_bound_config,
+            apply_collector=self._apply_collector_config,
+        )
+        self.config = self.configs.current_config()
         self._restore()
 
     def _register_namespaces(self) -> None:
@@ -113,6 +133,78 @@ class Platform:
             ("battery", "dust", "dust-damper"),
         ):
             self.namespaces.register(area, device, kind)
+
+    # ------------------------------------------------------------ 配置下发
+
+    def _apply_live_config(self, config: PlatformConfig) -> None:
+        """即时项：除尘挡板开度/速率、联动滞后、换向间隔。"""
+
+        self.damper.bind(config.dust.damper_open_deg, config.dust.damper_rate_deg_per_s)
+        self.schedule.bind(config.dust.linkage_lag_s)
+        self.reversal.bind_interval(config.heating)
+
+    def _apply_collector_config(self, config: PlatformConfig) -> None:
+        """集气管目标带与调节速率（装煤操作期间延迟到操作结束）。"""
+
+        self.collector.bind(config.collector)
+
+    def _apply_bound_config(self, config: PlatformConfig) -> None:
+        """配方项：操作开始时冻结的各执行组件参数。"""
+
+        self.pusher.bind(config.pusher)
+        self.stroke.bind(config.pusher.stroke_baseline_mm, config.pusher.stroke_tolerance_mm)
+        self.speed.bind(
+            config.pusher.speed_min_mm_s,
+            config.pusher.speed_max_mm_s,
+            config.pusher.speed_default_mm_s,
+        )
+        self.guide.bind(config.guide)
+        self.charger.bind(config.charger)
+        self.quench_car.bind(config.quench)
+        self.door.bind(config.door)
+        self.door.latch.bind(config.door.latch_travel_mm)
+        self.temperature.bind(config.heating)
+
+    @contextlib.contextmanager
+    def _operation_pin(self, operation: str) -> Iterator[tuple[PlatformConfig, int]]:
+        """把一次操作固定在开始那一版配置上，异常时也安全解除冻结。
+
+        产出 ``(冻结版配置, 版本序号)``：操作内读配方与审计落版本号都用它。
+        """
+
+        pinned_seq = self.configs.begin_operation(operation)
+        try:
+            yield self.configs.get(pinned_seq).config, pinned_seq
+        finally:
+            self.configs.end_operation(operation)
+
+    # ------------------------------------------------------------ 热更新 API
+
+    def config_overview(self) -> dict:
+        """当前配置 + 版本链 + 在跑冻结状态，供控制台展示与核对。"""
+
+        version = self.configs.current()
+        return {
+            "config": config_to_mapping(version.config),
+            "versions": self.configs.history(),
+            **self.configs.config_status(),
+        }
+
+    def migrate_config(self, mapping: Mapping[str, Any], *, reason: str = "manual") -> dict:
+        """整套切换到一份新配置；在跑操作不受打断，按类别生效。"""
+
+        result = self.configs.migrate(mapping, reason=reason)
+        if result.get("changed"):
+            self.config = self.configs.current_config()
+        return result
+
+    def rollback_config(self, *, reason: str = "rollback") -> dict:
+        """回退到上一版（幂等）。"""
+
+        result = self.configs.rollback(reason=reason)
+        if result.get("changed"):
+            self.config = self.configs.current_config()
+        return result
 
     def _restore(self) -> None:
         """从落盘审计回放最后一次换向，恢复换向间隔计时。"""
@@ -180,6 +272,7 @@ class Platform:
             "oven": oven,
             "ok": bool(report.get("ok")),
             "violations": list(report.get("violations", [])),
+            "config_seq": report.get("config_seq"),
         }
         self.bus.publish(
             Event.of(
@@ -223,9 +316,12 @@ class Platform:
 
         with self._lock:
             op_id = self.ids.next()
-            report = charge_oven(
-                self.charger, self.collector, self.flap, oven, hopper_target_mm, hopper_measured_mm, dt
-            )
+            with self._operation_pin("charge") as (_pinned_config, pinned_seq):
+                report = charge_oven(
+                    self.charger, self.collector, self.flap, oven,
+                    hopper_target_mm, hopper_measured_mm, dt,
+                )
+                report["config_seq"] = pinned_seq
             summary = self._record_operation(op_id, "charge", report)
             summary["op_id"] = op_id
             self._operations += 1
@@ -245,20 +341,24 @@ class Platform:
 
         with self._lock:
             op_id = self.ids.next()
-            target = self.stroke.baseline_mm if stroke_target_mm is None else stroke_target_mm
-            self.speed.request("auto_cycle", speed_mm_s or self.config.pusher.speed_default_mm_s, priority=50)
-            arbitration = self.speed.resolve()
-            self.schedule.start_link(self.clock.now())
-            report = push_oven(
-                self.pusher,
-                self.guide,
-                oven,
-                guide_target_mm,
-                guide_measured_mm,
-                target,
-                arbitration.speed_mm_s,
-                dt,
-            )
+            with self._operation_pin("push") as (pinned, pinned_seq):
+                target = self.stroke.baseline_mm if stroke_target_mm is None else stroke_target_mm
+                self.speed.request(
+                    "auto_cycle", speed_mm_s or pinned.pusher.speed_default_mm_s, priority=50
+                )
+                arbitration = self.speed.resolve()
+                self.schedule.start_link(self.clock.now())
+                report = push_oven(
+                    self.pusher,
+                    self.guide,
+                    oven,
+                    guide_target_mm,
+                    guide_measured_mm,
+                    target,
+                    arbitration.speed_mm_s,
+                    dt,
+                )
+                report["config_seq"] = pinned_seq
             stroke_check = self.stroke.check(self.pusher.ram_mm)
             report["speed_arbitration"] = arbitration.as_dict()
             report["stroke_check"] = stroke_check
@@ -273,7 +373,9 @@ class Platform:
 
         with self._lock:
             op_id = self.ids.next()
-            report = quench_oven(self.quench_car, oven, dt)
+            with self._operation_pin("quench") as (_pinned_config, pinned_seq):
+                report = quench_oven(self.quench_car, oven, dt)
+                report["config_seq"] = pinned_seq
             report["travel_eta_s"] = self.quench_car.plan.eta_s()
             summary = self._record_operation(op_id, "quench", report)
             summary["op_id"] = op_id
@@ -286,8 +388,14 @@ class Platform:
 
         with self._lock:
             op_id = self.ids.next()
-            target_temp = self.config.heating.temp_target_c if temperature_c is None else temperature_c
-            report = reverse_heating(self.reversal, self.valves, self.temperature, oven, target_temp)
+            with self._operation_pin("reverse") as (pinned, pinned_seq):
+                target_temp = (
+                    pinned.heating.temp_target_c if temperature_c is None else temperature_c
+                )
+                report = reverse_heating(
+                    self.reversal, self.valves, self.temperature, oven, target_temp
+                )
+                report["config_seq"] = pinned_seq
             report["offset_c"] = self.temperature.offset_c()
             summary = self._record_operation(op_id, "reverse", report)
             summary["op_id"] = op_id
@@ -300,7 +408,9 @@ class Platform:
 
         with self._lock:
             op_id = self.ids.next()
-            report = clean_door(self.door, oven, dt)
+            with self._operation_pin("clean") as (_pinned_config, pinned_seq):
+                report = clean_door(self.door, oven, dt)
+                report["config_seq"] = pinned_seq
             summary = self._record_operation(op_id, "clean", report)
             summary["op_id"] = op_id
             self._operations += 1
@@ -461,6 +571,7 @@ class Platform:
             "cycles": self._cycles,
             "now": round(self.clock.now(), 3),
             "utc": self.clock.utc_iso(),
+            "config": self.configs.config_status(),
             "pusher": self.pusher.snapshot().as_dict(),
             "speed": {"committed_mm_s": round(self.speed.committed(), 2)},
             "stroke": {

@@ -31,6 +31,13 @@ class DoorCleaner:
     def latch(self) -> DoorLatch:
         return self._latch
 
+    def bind(self, limits: DoorLimits, latch: DoorLatch | None = None) -> None:
+        """热绑定新版炉门清扫约束（配方类，下一次清扫生效）。"""
+
+        self._limits = limits
+        if latch is not None:
+            self._latch = latch
+
     def open_door(self, oven: str) -> None:
         """打开炉门并记录碳化室号。"""
 

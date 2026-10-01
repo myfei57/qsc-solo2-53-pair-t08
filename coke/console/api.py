@@ -46,6 +46,9 @@ class Api:
         add("GET", "/api/timeline", self._timeline)
         add("GET", "/api/journal", self._journal)
         add("GET", "/api/readiness", self._readiness)
+        add("GET", "/api/config", lambda params, body: self._platform.config_overview())
+        add("POST", "/api/config/migrate", self._config_migrate)
+        add("POST", "/api/config/rollback", lambda params, body: self._platform.rollback_config())
         add("POST", "/api/step", self._step)
         add("POST", "/api/charge", self._charge)
         add("POST", "/api/push", self._push)
@@ -137,6 +140,11 @@ class Api:
             "last_audit_ts": recent[-1]["ts"] if recent else None,
         }
         return {"ready": all(checks.values()), "checks": checks, "info": info}
+
+    def _config_migrate(self, params: dict, body: dict) -> dict:
+        if not isinstance(body, dict) or not body:
+            raise CokeError("改版必须提交一份完整配置（JSON 对象）", component="config")
+        return self._platform.migrate_config(body, reason="console")
 
     def _step(self, params: dict, body: dict) -> dict:
         return self._platform.cycle(dt=_as_float(body, "dt", 1.0))

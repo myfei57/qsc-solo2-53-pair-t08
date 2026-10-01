@@ -24,6 +24,11 @@ class OvenTemperature:
     def value_c(self) -> float:
         return self._value_c
 
+    def bind(self, limits: HeatingLimits) -> None:
+        """热绑定新版炉温目标与确认带（配方类，下一次换向生效，当前回读保留）。"""
+
+        self._limits = limits
+
     def update(self, temperature_c: float) -> float:
         """喂入一次炉温回读，返回新温度。"""
 

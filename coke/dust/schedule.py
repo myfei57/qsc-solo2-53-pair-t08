@@ -19,6 +19,11 @@ class DamperSchedule:
     def lag_s(self) -> float:
         return self._lag_s
 
+    def bind(self, lag_s: float) -> None:
+        """热绑定新版联动滞后（LIVE：不改变已在跑联动的起点时刻）。"""
+
+        self._lag_s = float(lag_s)
+
     def start_link(self, push_ts: float) -> None:
         """记录推焦开始时刻，启动一次联动。"""
 

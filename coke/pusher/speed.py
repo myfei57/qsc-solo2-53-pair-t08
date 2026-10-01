@@ -34,6 +34,7 @@ class SpeedArbiter:
     def __init__(self, min_mm_s: float, max_mm_s: float, default_mm_s: float) -> None:
         self._min = float(min_mm_s)
         self._max = float(max_mm_s)
+        self._default = float(default_mm_s)
         self._committed = float(default_mm_s)
         self._seq = 0
         self._requests: dict[str, tuple[float, int, int]] = {}
@@ -41,6 +42,14 @@ class SpeedArbiter:
     @property
     def limits(self) -> tuple[float, float]:
         return (self._min, self._max)
+
+    def bind(self, min_mm_s: float, max_mm_s: float, default_mm_s: float) -> None:
+        """热绑定新版速度区间；已提交速度按新区间夹取，已登记请求保持不变。"""
+
+        self._min = float(min_mm_s)
+        self._max = float(max_mm_s)
+        self._committed = max(self._min, min(self._max, self._committed))
+        self._default = float(default_mm_s)
 
     def request(self, writer: str, speed_mm_s: float, priority: int) -> None:
         """登记一路速度请求（最高优先级 + 最新提交胜出）。"""
