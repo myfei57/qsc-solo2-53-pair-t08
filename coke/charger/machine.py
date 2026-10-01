@@ -29,6 +29,13 @@ class ChargingCar:
     def limits(self) -> ChargerLimits:
         return self._limits
 
+    def rebind(self, limits: ChargerLimits) -> None:
+        """换版：没有正在给煤时才允许更换限值包。"""
+
+        if self._feeding:
+            raise AlignmentError("装煤车正在给煤，本炉操作结束前禁止换版", component="charger")
+        self._limits = limits
+
     def align_hopper(self, oven: str, target_mm: float, measured_mm: float) -> Alignment:
         """核对煤斗对位，返回核对结果。"""
 

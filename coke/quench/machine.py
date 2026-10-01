@@ -32,6 +32,13 @@ class QuenchCar:
     def spray(self) -> Spray:
         return self._spray
 
+    def rebind(self, limits: QuenchLimits) -> None:
+        """换版：熄焦车空闲（未走行、喷淋阀未开）时才允许更换限值包。"""
+
+        if self._loaded or self._spray.open:
+            raise InterlockError("熄焦车正在执行本炉流程，结束前禁止换版", component="quench")
+        self._limits = limits
+
     def receive(self, oven: str) -> None:
         """在焦侧接焦。"""
 

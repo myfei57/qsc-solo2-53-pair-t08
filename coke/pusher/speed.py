@@ -34,6 +34,7 @@ class SpeedArbiter:
     def __init__(self, min_mm_s: float, max_mm_s: float, default_mm_s: float) -> None:
         self._min = float(min_mm_s)
         self._max = float(max_mm_s)
+        self._default = float(default_mm_s)
         self._committed = float(default_mm_s)
         self._seq = 0
         self._requests: dict[str, tuple[float, int, int]] = {}
@@ -69,3 +70,10 @@ class SpeedArbiter:
         """返回当前登记了请求的写入方。"""
 
         return sorted(self._requests)
+
+    def rebind(self, min_mm_s: float, max_mm_s: float, default_mm_s: float) -> None:
+        """换版（pinned）：更新速度上下限；下一炉推焦按新版仲裁。"""
+
+        self._min = float(min_mm_s)
+        self._max = float(max_mm_s)
+        self._default = float(default_mm_s)

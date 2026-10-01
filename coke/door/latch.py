@@ -55,3 +55,11 @@ class DoorLatch:
         """返回闩锁压紧次数。"""
 
         return self._cycles
+
+    def rebind(self, travel_mm: float) -> None:
+        """换版：只在闩锁处于压紧（安全）位置时才允许更换行程。"""
+
+        if not self._engaged:
+            raise InterlockError("闩锁处于松开状态，本炉操作结束前禁止换版", component="door")
+        self._travel_mm = float(travel_mm)
+        self._position_mm = self._travel_mm

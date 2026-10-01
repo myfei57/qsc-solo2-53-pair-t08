@@ -31,6 +31,14 @@ class DoorCleaner:
     def latch(self) -> DoorLatch:
         return self._latch
 
+    def rebind(self, limits: DoorLimits) -> None:
+        """换版：炉门已关闭且无在跑清扫时才允许更换限值包。"""
+
+        if self._door_open:
+            raise InterlockError("炉门清扫正在进行，结束前禁止换版", component="door")
+        self._limits = limits
+        self._latch.rebind(limits.latch_travel_mm)
+
     def open_door(self, oven: str) -> None:
         """打开炉门并记录碳化室号。"""
 

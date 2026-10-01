@@ -32,6 +32,13 @@ class GuideCar:
     def limits(self) -> GuideLimits:
         return self._limits
 
+    def rebind(self, limits: GuideLimits) -> None:
+        """换版：导焦栅未锁定时才允许更换限值包。"""
+
+        if self._locked:
+            raise AlignmentError("导焦栅已锁定，本炉操作结束前禁止换版", component="guide")
+        self._limits = limits
+
     def align(self, oven: str, target_mm: float, measured_mm: float) -> Alignment:
         """按目标与实测位置核对对齐，返回核对结果。"""
 

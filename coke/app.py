@@ -10,12 +10,15 @@ from __future__ import annotations
 
 import dataclasses
 import threading
+from typing import Any, Mapping
 
 from .audit.log import AuditLog
 from .audit.record import AuditRecord
 from .charger.machine import ChargingCar
 from .clock import Clock, SystemClock
-from .config import PlatformConfig, default_config
+from .config import PlatformConfig, config_to_mapping, default_config
+from .configmeta import classes_for
+from .configversion import ConfigRegistry, content_hash
 from .door.latch import DoorLatch
 from .door.machine import DoorCleaner
 from .dust.damper import DustDamper
@@ -48,6 +51,16 @@ DEFAULT_UNIT = "battery1"
 DEFAULT_OVEN = "oven01"
 
 
+def _audit_scalar(key: str, value: Any) -> Any:
+    """把核对结果里的非标量字段转成可落审计的标量（审计不嵌复杂结构）。"""
+
+    if key == "in_use_versions":
+        return ",".join(value) if value else ""
+    if key == "all_on_active":
+        return bool(value)
+    return value
+
+
 class Platform:
     """焦炉推装熄顺序控制平台。"""
 
@@ -57,46 +70,256 @@ class Platform:
         clock: Clock | None = None,
         unit: str = DEFAULT_UNIT,
     ) -> None:
-        self.config = config or default_config()
+        startup = config or default_config()
         self.clock = clock or SystemClock()
         self.bus = EventBus()
         self.unit = unit
 
-        store = JsonStore(self.config.storage_root)
+        store = JsonStore(startup.storage_root)
         self.store = store
         self.audit = AuditLog(self.clock, self.bus, JsonlJournal(store.root, "audit", segment_limit=512))
+        # 配置版本注册中心：从落盘版本链恢复当前生效版；首次启动则以传入配置
+        # 建立基线版本。所有后续装配都以"当前生效版"为准，而不是启动参数。
+        self.configs = ConfigRegistry(store, self.clock, initial=startup, source="startup")
+        if self.configs.restored_differs(startup):
+            self._publish_config(
+                "config_restored",
+                severity="warning",
+                message="落盘生效配置与启动配置不一致，已以落盘版本为准",
+                startup_hash=content_hash(startup),
+            )
+        active = self.configs.active
+        self._active_version_id = active.version_id
+        config = active.config
+
         self.namespaces = NamespaceRegistry(unit)
         self.topology: Topology = build_default_topology()
         self.trend = TrendBuffer(period_s=5.0)
         self.ids = IdFactory("op")
 
-        self.pusher = PusherMachine(self.config.pusher)
+        # 每个执行器实际持有的配置版本：live 类换版后立即指向新版，pinned 类
+        # 在各自操作安全边界换版后才更新。据此核对"生效版 vs 在跑版"。
+        self._actuator_versions: dict[str, str] = {}
+        self.pusher = PusherMachine(config.pusher)
+        self._bind_version("pusher", active.version_id)
         self.stroke = StrokeBaseline(
-            self.config.pusher.stroke_baseline_mm, self.config.pusher.stroke_tolerance_mm
+            config.pusher.stroke_baseline_mm, config.pusher.stroke_tolerance_mm
         )
         self.speed = SpeedArbiter(
-            self.config.pusher.speed_min_mm_s,
-            self.config.pusher.speed_max_mm_s,
-            self.config.pusher.speed_default_mm_s,
+            config.pusher.speed_min_mm_s,
+            config.pusher.speed_max_mm_s,
+            config.pusher.speed_default_mm_s,
         )
-        self.guide = GuideCar(self.config.guide)
-        self.charger = ChargingCar(self.config.charger)
-        self.quench_car = QuenchCar(self.config.quench)
-        self.collector = CollectorMain(self.config.collector)
+        self._bind_version("pusher_speed", active.version_id)
+        self.guide = GuideCar(config.guide)
+        self._bind_version("guide", active.version_id)
+        self.charger = ChargingCar(config.charger)
+        self._bind_version("charger", active.version_id)
+        self.quench_car = QuenchCar(config.quench)
+        self._bind_version("quench", active.version_id)
+        self.collector = CollectorMain(config.collector)
+        self._bind_version("collector", active.version_id)
         self.flap = BridgeFlap(FlapLatch())
-        self.door = DoorCleaner(self.config.door, DoorLatch(self.config.door.latch_travel_mm))
-        self.reversal = HeatingReversal(self.config.heating, self.clock)
+        self.door = DoorCleaner(config.door, DoorLatch(config.door.latch_travel_mm))
+        self._bind_version("door", active.version_id)
+        self.reversal = HeatingReversal(config.heating, self.clock)
+        self._reversal_pending_version_id: str | None = None
+        self._bind_version("reversal", active.version_id)
         self.valves = ValveTrain()
-        self.temperature = OvenTemperature(self.config.heating)
+        self.temperature = OvenTemperature(config.heating)
+        self._bind_version("temperature", active.version_id)
         self.dust = DustSystem()
-        self.damper = DustDamper(self.config.dust.damper_open_deg, self.config.dust.damper_rate_deg_per_s)
-        self.schedule = DamperSchedule(self.config.dust.linkage_lag_s)
+        self.damper = DustDamper(config.dust.damper_open_deg, config.dust.damper_rate_deg_per_s)
+        self._bind_version("damper", active.version_id)
+        self.schedule = DamperSchedule(config.dust.linkage_lag_s)
+        self._bind_version("damper_linkage", active.version_id)
 
         self._cycles = 0
         self._operations = 0
         self._lock = threading.RLock()
         self._register_namespaces()
         self._restore()
+
+    # ---- 配置热更新 -----------------------------------------------------
+
+    @property
+    def config(self) -> PlatformConfig:
+        """当前生效的整套配置。"""
+
+        return self.configs.config()
+
+    def _bind_version(self, actuator: str, version_id: str) -> None:
+        self._actuator_versions[actuator] = version_id
+
+    def _publish_config(self, action: str, **payload: Any) -> None:
+        severity = str(payload.pop("severity", "notice"))
+        message = str(payload.pop("message", ""))
+        self.bus.publish(
+            Event.of("config", "config", action, severity=severity, message=message, **payload)
+        )
+
+    def _adopt_config(self, cfg: PlatformConfig, version_id: str) -> None:
+        """把一版已激活的配置下发给各执行器并更新它们的在跑版本。
+
+        live 类执行器立即换版；pinned 类执行器若处于操作中途会抛联锁异常——
+        但平台所有操作都在同一把锁内同步完成，调用本方法时它们必然空闲，真
+        正跨操作的长寿命契约（换向间隔）由排程器自己延后到下一次换向安装。
+        """
+
+        # --- pinned：离散操作类，仅在安全空闲边界换版 ---
+        self.pusher.rebind(cfg.pusher)
+        self._bind_version("pusher", version_id)
+        self.speed.rebind(
+            cfg.pusher.speed_min_mm_s, cfg.pusher.speed_max_mm_s, cfg.pusher.speed_default_mm_s
+        )
+        self._bind_version("pusher_speed", version_id)
+        self.guide.rebind(cfg.guide)
+        self._bind_version("guide", version_id)
+        self.charger.rebind(cfg.charger)
+        self._bind_version("charger", version_id)
+        self.quench_car.rebind(cfg.quench)
+        self._bind_version("quench", version_id)
+        self.door.rebind(cfg.door)
+        self._bind_version("door", version_id)
+        # 换向间隔/废气提前量：登记待生效，当前这轮换向周期仍按旧版跑到点。
+        self.reversal.rebind(cfg.heating)
+        if self.reversal.pending_version_ready():
+            self._reversal_pending_version_id = version_id
+        else:
+            self._reversal_pending_version_id = None
+            self._bind_version("reversal", version_id)
+        # --- live：连续调节类，下一周期立即生效 ---
+        self.collector.rebind(cfg.collector)
+        self._bind_version("collector", version_id)
+        self.temperature.rebind(cfg.heating)
+        self._bind_version("temperature", version_id)
+        self.damper.rebind(cfg.dust.damper_open_deg, cfg.dust.damper_rate_deg_per_s)
+        self._bind_version("damper", version_id)
+        self.schedule.rebind(cfg.dust.linkage_lag_s)
+        self._bind_version("damper_linkage", version_id)
+
+    def in_use_versions(self) -> dict[str, str]:
+        """返回各执行器当前实际在用的配置版本标识。"""
+
+        with self._lock:
+            return dict(self._actuator_versions)
+
+    def reconcile_config(self) -> dict:
+        """核对当前生效版与各执行器在跑版本，返回核对结果。"""
+
+        with self._lock:
+            report = self.configs.reconcile(self._actuator_versions)
+            report["reversal_pending"] = self.reversal.pending_version_ready()
+            return report
+
+    def apply_config(
+        self,
+        mapping: Mapping[str, Any],
+        *,
+        source: str = "console",
+        reason: str = "",
+    ) -> dict:
+        """热更新：校验并整套切换到新版配置，不打断任何在跑操作。
+
+        校验失败（缺字段、越界、跨字段矛盾）时整版拒绝，当前生效版不动；
+        成功则原子激活新版本、下发执行器，并把提议与激活都落审计。
+        """
+
+        with self._lock:
+            before = self.configs.active
+            candidate = self.configs.propose(mapping)
+            # platform 段是启动装配项，不参与热更新：保留当前生效版的身份与
+            # 存储目录，只整套替换 limits 段。版本身份哈希也只覆盖 limits。
+            candidate = dataclasses.replace(
+                candidate, name=before.config.name, storage_root=before.config.storage_root
+            )
+            self._publish_config(
+                "config_proposed",
+                from_version=before.version_id,
+                from_hash=before.content_hash,
+                proposed_hash=content_hash(candidate),
+                source=source,
+                reason=reason,
+            )
+            version = self.configs.activate(candidate, source=source, reason=reason)
+            changed = version.version_id != before.version_id
+            if changed:
+                self._adopt_config(version.config, version.version_id)
+                self._active_version_id = version.version_id
+            self._publish_config(
+                "config_activated",
+                from_version=before.version_id,
+                to_version=version.version_id,
+                from_hash=before.content_hash,
+                to_hash=version.content_hash,
+                changed=changed,
+                source=source,
+                reason=reason,
+                severity="notice",
+                message="配置已整套切换" if changed else "配置内容无变化，沿用当前版",
+            )
+            report = self.reconcile_config()
+            self._publish_config("config_reconciled", **{k: _audit_scalar(k, v) for k, v in report.items() if k != "in_use"})
+            return {
+                "changed": changed,
+                "active": version.as_summary(),
+                "previous": before.as_summary(),
+                "reconcile": report,
+            }
+
+    def rollback_config(self, *, source: str = "console", reason: str = "") -> dict:
+        """退回上一版配置。回退幂等：重复调用状态结果一致，每次尝试都留痕。"""
+
+        with self._lock:
+            before = self.configs.active
+            target, switched = self.configs.rollback(source=source, reason=reason)
+            if switched:
+                self._adopt_config(target.config, target.version_id)
+                self._active_version_id = target.version_id
+            self._publish_config(
+                "config_rollback",
+                from_version=before.version_id,
+                to_version=target.version_id,
+                from_hash=before.content_hash,
+                to_hash=target.content_hash,
+                switched=switched,
+                source=source,
+                reason=reason,
+                severity="notice" if switched else "warning",
+                message="配置已退回上一版" if switched else "已无上一版可退（或已在该版），状态不变",
+            )
+            if switched:
+                report = self.reconcile_config()
+                self._publish_config(
+                    "config_reconciled",
+                    **{k: _audit_scalar(k, v) for k, v in report.items() if k != "in_use"},
+                )
+            else:
+                report = self.reconcile_config()
+            return {
+                "switched": switched,
+                "active": target.as_summary(),
+                "requested_from": before.as_summary(),
+                "reconcile": report,
+            }
+
+    def config_status(self) -> dict:
+        """返回配置版本视图，供控制台展示与落审计核对。"""
+
+        with self._lock:
+            active = self.configs.active
+            previous = self.configs.previous()
+            return {
+                "switch_mode": "atomic_whole_set",
+                "active": active.as_summary(),
+                "previous": previous.as_summary() if previous else None,
+                "rollback_available": previous is not None,
+                "in_use": self.in_use_versions(),
+                "reconcile": self.reconcile_config(),
+                "field_classes": classes_for(active.config),
+                "history": self.configs.history(),
+                "config": config_to_mapping(active.config),
+            }
 
     def _register_namespaces(self) -> None:
         """登记现场设备命名空间（控制台与审计共用同一套名字）。"""
@@ -139,7 +362,7 @@ class Platform:
             {"operations": self._operations, "cycles": self._cycles, "unit": self.unit},
         )
 
-    def _record_operation(self, op_id: str, operation: str, report: dict) -> dict:
+    def _record_operation(self, op_id: str, operation: str, report: dict, config_version: str | None = None) -> dict:
         """把编排步骤逐条写审计，并记一条汇总事件。"""
 
         oven = str(report.get("oven", ""))
@@ -180,6 +403,8 @@ class Platform:
             "oven": oven,
             "ok": bool(report.get("ok")),
             "violations": list(report.get("violations", [])),
+            # 本次操作按哪一版配置跑完——操作开始时租用，整炉不变。
+            "config_version": config_version or self._active_version_id,
         }
         self.bus.publish(
             Event.of(
@@ -226,7 +451,7 @@ class Platform:
             report = charge_oven(
                 self.charger, self.collector, self.flap, oven, hopper_target_mm, hopper_measured_mm, dt
             )
-            summary = self._record_operation(op_id, "charge", report)
+            summary = self._record_operation(op_id, "charge", report, self._actuator_versions.get("charger"))
             summary["op_id"] = op_id
             self._operations += 1
             self._persist()
@@ -262,7 +487,7 @@ class Platform:
             stroke_check = self.stroke.check(self.pusher.ram_mm)
             report["speed_arbitration"] = arbitration.as_dict()
             report["stroke_check"] = stroke_check
-            summary = self._record_operation(op_id, "push", report)
+            summary = self._record_operation(op_id, "push", report, self._actuator_versions.get("pusher"))
             summary["op_id"] = op_id
             self._operations += 1
             self._persist()
@@ -275,7 +500,7 @@ class Platform:
             op_id = self.ids.next()
             report = quench_oven(self.quench_car, oven, dt)
             report["travel_eta_s"] = self.quench_car.plan.eta_s()
-            summary = self._record_operation(op_id, "quench", report)
+            summary = self._record_operation(op_id, "quench", report, self._actuator_versions.get("quench"))
             summary["op_id"] = op_id
             self._operations += 1
             self._persist()
@@ -289,7 +514,12 @@ class Platform:
             target_temp = self.config.heating.temp_target_c if temperature_c is None else temperature_c
             report = reverse_heating(self.reversal, self.valves, self.temperature, oven, target_temp)
             report["offset_c"] = self.temperature.offset_c()
-            summary = self._record_operation(op_id, "reverse", report)
+            # 换向安全完成后排程器才会安装待生效的新版间隔，同步在跑版本指针。
+            if report.get("ok") and self._reversal_pending_version_id is not None:
+                pending_id = self._reversal_pending_version_id
+                self._reversal_pending_version_id = None
+                self._bind_version("reversal", pending_id)
+            summary = self._record_operation(op_id, "reverse", report, self._actuator_versions.get("reversal"))
             summary["op_id"] = op_id
             self._operations += 1
             self._persist()
@@ -301,7 +531,7 @@ class Platform:
         with self._lock:
             op_id = self.ids.next()
             report = clean_door(self.door, oven, dt)
-            summary = self._record_operation(op_id, "clean", report)
+            summary = self._record_operation(op_id, "clean", report, self._actuator_versions.get("door"))
             summary["op_id"] = op_id
             self._operations += 1
             self._persist()
@@ -459,6 +689,8 @@ class Platform:
             "unit": self.unit,
             "operations": self._operations,
             "cycles": self._cycles,
+            "config_version": self.configs.active.version_id,
+            "config_reconcile": self.reconcile_config(),
             "now": round(self.clock.now(), 3),
             "utc": self.clock.utc_iso(),
             "pusher": self.pusher.snapshot().as_dict(),

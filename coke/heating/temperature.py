@@ -39,3 +39,8 @@ class OvenTemperature:
         """返回与目标温度的偏差。"""
 
         return self._value_c - self._limits.temp_target_c
+
+    def rebind(self, limits: HeatingLimits) -> None:
+        """换版（live）：炉温目标与确认带在下一次确认判定时立即生效。"""
+
+        self._limits = limits

@@ -37,3 +37,9 @@ class DustDamper:
         """挡板是否已开到工作开度。"""
 
         return self._angle_deg >= self._open_deg - 1e-9
+
+    def rebind(self, open_deg: float, rate_deg_per_s: float) -> None:
+        """换版（live）：工作开度与驱动速率在下一控制周期立即生效。"""
+
+        self._open_deg = float(open_deg)
+        self._rate_deg_per_s = float(rate_deg_per_s)

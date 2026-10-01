@@ -48,3 +48,11 @@ class DamperSchedule:
         """返回累计联动次数。"""
 
         return self._links
+
+    def rebind(self, lag_s: float) -> None:
+        """换版（live）：联动滞后从下一次 ``start_link`` 起生效。
+
+        正在计时的本次联动仍按开始时的滞后跑完，不打断推焦与挡板的约定时序。
+        """
+
+        self._lag_s = float(lag_s)

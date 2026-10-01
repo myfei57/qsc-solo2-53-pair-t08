@@ -46,6 +46,9 @@ class Api:
         add("GET", "/api/timeline", self._timeline)
         add("GET", "/api/journal", self._journal)
         add("GET", "/api/readiness", self._readiness)
+        add("GET", "/api/config", self._config_status)
+        add("POST", "/api/config/apply", self._config_apply)
+        add("POST", "/api/config/rollback", self._config_rollback)
         add("POST", "/api/step", self._step)
         add("POST", "/api/charge", self._charge)
         add("POST", "/api/push", self._push)
@@ -137,6 +140,26 @@ class Api:
             "last_audit_ts": recent[-1]["ts"] if recent else None,
         }
         return {"ready": all(checks.values()), "checks": checks, "info": info}
+
+    def _config_status(self, params: dict, body: dict) -> dict:
+        return self._platform.config_status()
+
+    def _config_mapping(self, body: dict) -> dict:
+        """从请求体取整套配置：支持 {"config": {...}} 或直接传配置映射。"""
+
+        candidate = body.get("config", body)
+        if not isinstance(candidate, dict):
+            raise CokeError("请求体必须包含整套配置映射", component="config")
+        return candidate
+
+    def _config_apply(self, params: dict, body: dict) -> dict:
+        mapping = self._config_mapping(body)
+        reason = str(body.get("reason", ""))
+        return self._platform.apply_config(mapping, source="console", reason=reason)
+
+    def _config_rollback(self, params: dict, body: dict) -> dict:
+        reason = str(body.get("reason", ""))
+        return self._platform.rollback_config(source="console", reason=reason)
 
     def _step(self, params: dict, body: dict) -> dict:
         return self._platform.cycle(dt=_as_float(body, "dt", 1.0))

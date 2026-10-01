@@ -32,6 +32,18 @@ class PusherMachine:
     def limits(self) -> PusherLimits:
         return self._limits
 
+    def rebind(self, limits: PusherLimits) -> None:
+        """换版：只在设备空闲（没有在跑的推焦）时允许更换限值包。
+
+        正在推焦时调用即拒绝——在跑操作必须按开始那一版跑完，不能中途换参。
+        """
+
+        if self._state != IDLE:
+            raise InterlockError(
+                f"推焦机正处于 {self._state}，在跑操作结束前禁止换版", component="pusher"
+            )
+        self._limits = limits
+
     @property
     def state(self) -> str:
         return self._state
